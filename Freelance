@@ -1,0 +1,409 @@
+/**
+ * <h3>Change-Log</h3>
+ * <table border="2"; valign="top">
+ *     <tr>
+ *        <th>Änderung</th>
+ *        <th>Datum</th>
+ *        <th>Wer</th>
+ *     </tr>
+ *     <tr>
+ *         <td><b>Null-Safety implementiert  - notwendig da Jira 10.3 Groovy Version 4 verwendet</b><br>
+ *            um diese zu erreichen, sind folgende Anpassungen notwendig:
+ *            <ul>
+ *            <li>muss vor dem Aufruf einer Methode oder Attribute der Klasse ein ? eingefügt werden.<br>
+ *                    z.B. this.jM.name  --->  this.jM?.name
+ *                </li>>
+ *                <li>Attribute einer Klasse müssen innerhalb der Klasse mit "this." referenziert werden</li>
+ *            </ul>
+ *         </td>
+ *         <td>17.03.2025</td>
+ *         <td>Oliver Hartmann</td>
+ *     </tr>
+ * </table> 
+ */
+
+package com.tab.listeners
+
+
+import com.atlassian.jira.component.ComponentAccessor
+import com.atlassian.jira.config.ConstantsManager
+import com.atlassian.jira.event.type.EventDispatchOption
+import com.atlassian.jira.issue.MutableIssue
+import com.atlassian.jira.user.ApplicationUser
+import com.onresolve.scriptrunner.runner.util.UserMessageUtil
+import com.riadalabs.jira.plugins.insight.services.model.ObjectBean
+import com.onresolve.scriptrunner.runner.customisers.WithPlugin
+import com.tab.IssueParameter
+import com.tab.MapChangeArtProjekt
+import com.tab.interfaces.ListenerInterface
+
+@WithPlugin('com.riadalabs.jira.plugins.insight')
+
+/**
+ * Listener für das Projekt RFC, der durch die nachfolgenden Events reagiert und
+ * verschieden Automatisierungen für die verschiedenen Projekt / Vorgangstypen durchführt.
+
+ */
+class ListenerRfC extends ListenerInterface {
+    private ConstantsManager constantsManager = ComponentAccessor.constantsManager
+
+    /**
+     * @param binding       Binding Kontext des Scriptrunners
+     */
+    ListenerRfC (Binding binding) {
+        super(binding)
+        this.dropCallStack(this.className + '-Instanzierung')
+    }
+
+    /**
+     * @param issueKey      Key des Vorganges der verarbeitet werden soll
+     * @param eventTypeName Name des EventTypes der verarbeitet werden soll
+     */
+    ListenerRfC (String issueKey='', String eventTypeName = '') {
+        super(issueKey, eventTypeName)
+        this.dropCallStack(this.className + '-Instanzierung')
+    }
+
+    def run() {
+        runSafe()
+    }
+
+    /**
+    * Listener_Aktion für den Request for Change ausführen
+    */
+    def exec () {
+        String methodName = 'exec'
+        this.pushCallStack (methodName)
+
+        // ------------------->
+        String step = 'Parameter'
+        if (this.baseIssue == null) {
+            this.tabLog?.exception (step, "Error: baseIssue is null")
+        }
+        if (this.eventTypeName == '') {
+            this.tabLog?.exception (step, "Error: eventTypeName is not defined")
+        }
+        this.tabLog?.debug (step, this.tabLog?.getParamInfo([this.baseIssue?.key, this.baseIssue?.issueType?.name, this.baseIssue?.projectObject?.key, this.eventTypeName]))
+
+        // ------------------->
+        //step = 'Benutzerdefinierte Felder'
+        Boolean executeListenerAktion = false
+        Long issueCount = 0
+
+        // ------------------->
+        step = 'Main'
+
+        if (this.baseIssue?.projectObject?.key == 'RFC') {
+            switch (this.baseIssue?.issueType?.name) {
+                case ['Request for Change']:
+                    step = '[Request for Change]: '
+                    switch (this.eventTypeName) {
+                        case 'RFC: Vorgang erstellen':
+                            executeListenerAktion = true
+                            // Erstelle für einzele Komponente einen zusätzlichen Epic
+                            this.jM?.userInfo?.addInfo("Für den RfC &lt;" + this.baseIssue?.key + "&gt; wurde folgender zusätzlicher Vorgang erstellt", false, false)
+                            issueCount += this.createAdditonalIssueForRfc(this.baseIssue) as Integer
+                            break
+
+                        case 'Issue Created':
+                            step += this.eventTypeName
+                            this.tabLog?.debug(step, 'Start')
+                            this.baseIssueUpdated = false
+                            this.setPriorityByMapPriority()
+
+                            if (this.baseIssueUpdated) {
+                                this.jM?.updateIssue(this.baseIssue, this.jM?.userJiraBot, EventDispatchOption.ISSUE_UPDATED, true)
+                            }
+                            this.tabLog?.debug(step, 'Ende')
+                            break
+
+                        case 'Issue Updated':
+                            step += this.eventTypeName
+                            this.tabLog?.debug(step, 'Start')
+                            this.baseIssueUpdated = false
+                            this.setPriorityByMapPriority()
+
+                            if (this.baseIssueUpdated) {
+                                this.jM?.updateIssue(this.baseIssue, this.jM?.userJiraBot, EventDispatchOption.ISSUE_UPDATED, true)
+                            }
+                            this.tabLog?.debug(step, 'Ende')
+                            break
+
+                        case 'Generic Event':
+                            step += 'Post-Transition'
+                            this.tabLog?.debug(step, this.jM?.getLastHistoryItemValuesForField(this.baseIssue, 'status'))
+                            /*if (this.jM?.isTransitionLastActivity(this.baseIssue, ['Entwurf'], ['Genehmigung einholen'])) {
+                                // RFC: SOFTWARE - Request for Change - Genehmigung erstellen
+                                this.rfcAddGenehmigung()
+                            }
+                            else if (this.jM?.isTransitionLastActivity(this.baseIssue, [], ['Abgeschlossen', 'Verworfen'])) {
+
+                                // RfC Abgeschlossen/Verworfen --> Incident, Schwachstelle, Problem Status anpassen
+                                String comment = ''
+                                String action = ''
+                                if (this.jM?.checkStatus(this.baseIssue?.status, ['Abgeschlossen'])){
+                                    comment = 'Die Lösung wurde über den RfC ' + this.baseIssue?.key + '  bereitgestellt.'
+                                    action = 'RfC-Lösung übergeben'
+                                }
+                                else {
+                                    comment = 'Es wurde *{color:#DE350B}keine{color}* Lösung durch den RfC ' + this.baseIssue?.key + ' bereitgestellt'
+                                    action = 'RfC verworfen'
+                                }
+                                this.setParentToStatus(['IT-Störung', 'Schwachstelle', 'Problem'], ['Bearbeitung im RfC'],
+                                                       ['RfC'], action , comment, true, '', '', '', )
+                            }*/
+                            this.tabLog?.debug(step, 'Ende')
+                            break
+                    }
+                    break
+            }
+            if (executeListenerAktion) {
+                // prüfen ob vorgänge erstellt wurden
+                this.tabLog?.debug(step, 'RfC: Es wurden ' + issueCount + ' Vorgänge für den RfC erstellt')
+                if (issueCount == 0) {
+                    this.jM?.userInfo?.addInfo('<b style="color:red">Es wurden keine Vorgänge erstellt</b>', true, false)
+                }
+            }
+
+            // --------------------------->
+            step = 'Popup mit Informationen anzeigen'
+            this.tabLog?.debug(step, 'userInfo Text <' + this.jM?.userInfo?.toString() + '>')
+            this.tabLog?.debug(step, 'ErrFlag: ' + this.jM?.userInfo?.errFlag?.toString())
+            if (this.jM?.userInfo?.toString() != '') {
+                if (!this.jM?.userInfo?.errFlag) {
+                    UserMessageUtil.success(this.jM?.userInfo?.toString())
+                }
+                else {
+                    UserMessageUtil.error(this.jM?.userInfo?.toString())
+                }
+            }
+            this.dropCallStack(methodName)
+        }
+    }
+
+    /**
+    * Erstellt für die ausgewählte Change-Art pro selektierter Anwendung des aktuellen RfC (baseIssue) einen Vorgang im Projekt der Komponente
+    *
+    * @param   baseIssue    Reference auf den aktuellen Vorgang
+    * @return  Anzahl der erstellten Vorgänge
+    */
+    private Integer createIssueForRfc (MutableIssue baseIssue=null, String changeArt='', String anwendung='', boolean currentUser=true) {
+        String methodName = 'createIssueForRfc'
+        this.pushCallStack (methodName)
+
+        // ------------------->
+        String step = 'Parameter'
+        if (baseIssue == null) {
+            this.tabLog?.exception (step, "Error: baseIssue is null")
+        }
+        this.tabLog?.debug (step, this.tabLog?.getParamInfo([baseIssue?.key, changeArt, anwendung]))
+
+        // ------------------->
+        //step = 'Benutzerdefinierte Felder'
+        Integer issueCount = 0
+        MapChangeArtProjekt mapChangeArtProjekt = new MapChangeArtProjekt(this.tabLog)
+
+        // ------------------->
+        step = 'Main'
+
+        // ermittle den Vorgangstyp für Change-Art
+        if (!mapChangeArtProjekt?.containsChangeArt(changeArt)) {
+            // Change Art nicht in Map enthalten
+            this.tabLog?.debug (step, "Change Art: " + changeArt + " nicht in MapChangeArtProjekt enthalten")
+            this.jM?.userInfo?.addInfo("Change Art: " + changeArt + " nicht in MapChangeArtProjekt enthalten", true, true)
+            this.dropCallStack(methodName)
+            return 0 // keine Verarbeitung
+        }
+
+        String vorgangsTyp = mapChangeArtProjekt.getVorgangstyp(changeArt)
+        // festlegen welche Felder in den neuen Vorgang übernommen werden sollen
+        IssueParameter issueParameter = this.jM?.newIssueParameter()
+        issueParameter.issueTypeName = vorgangsTyp
+        issueParameter.projektKuerzel = mapChangeArtProjekt.getProjektKuerzel(changeArt)
+        issueParameter.linkToOriginal = true
+        issueParameter.linkTypeName = 'Bezug'
+        issueParameter.attachmentsAsComment = true
+        issueParameter.setSkipScreenCheck = true
+        issueParameter.originalIssueKey = baseIssue?.key
+        issueParameter.user = this.jM?.userJiraBot
+
+        issueParameter?.labels = this.jM?.labelManager?.getLabels(baseIssue?.id)?.collect{it.getLabel()} as Set
+        issueParameter.addFieldToCopy ('summary', baseIssue?.summary, anwendung + ' - ' )
+        issueParameter.addFieldToCopy ('description', baseIssue?.description, '')
+        if(currentUser){
+            issueParameter.addFieldToCopy ('reporter', this.jM?.userCurrent, '')
+        }
+        else{
+            issueParameter.addFieldToCopy ('reporter', baseIssue?.reporter, '')
+        }
+        issueParameter.addFieldToCopy ('dueDate', baseIssue?.dueDate, '')
+        issueParameter.addFieldToCopy ('priority', baseIssue?.priority, '')
+        issueParameter.addCustomFieldToCopy ('Anwendung', anwendung, '')
+        issueParameter.addCustomFieldToCopy ('Änderungsgrund', this.jM?.getCustomFieldValueByName(baseIssue, 'Änderungsgrund'), '')
+        issueParameter.addCustomFieldToCopy ('Dringlichkeitsstufe', this.jM?.getCustomFieldValueByName(baseIssue, 'Dringlichkeitsstufe'), '')
+        issueParameter.addCustomFieldToCopy ('Auswirkung des Changes', this.jM?.getCustomFieldValueByName(baseIssue, 'Auswirkung des Changes'), '')
+        issueParameter.addCustomFieldToCopy ('fachliches Risiko bei Nicht-Umsetzung', this.jM?.getCustomFieldValueByName(baseIssue, 'fachliches Risiko bei Nicht-Umsetzung'), '')
+        issueParameter.addCustomFieldToCopy ('Akzeptanzkriterien', this.jM?.getCustomFieldValueByName(baseIssue, 'Akzeptanzkriterien'), '')
+        issueParameter.addCustomFieldToCopy ('Begründung der Dringlichkeit', this.jM?.getCustomFieldValueByName(baseIssue, 'Begründung der Dringlichkeit'), '')
+        issueParameter.addCustomFieldToCopy ('Kostenstellen', this.jM?.getCustomFieldValueByName(baseIssue, 'Kostenstellen'), '')
+        issueParameter.addCustomFieldToCopy ('Kostenstellenarten', this.jM?.getCustomFieldValueByName(baseIssue, 'Kostenstellenarten'), '')
+        issueParameter.addCustomFieldToCopy ('automatisch erstellt', 'ja', '')
+        List<ApplicationUser> zugriff = []
+        zugriff?.add(baseIssue?.reporter)
+        if(baseIssue?.assignee){
+            zugriff?.add(baseIssue?.assignee)
+        }
+        jM.watcherManager.getWatchers(baseIssue, new Locale('de'))?.each{
+            zugriff?.add(it)
+        }
+        //Zugriffsliste bereinigen
+        zugriff?.removeAll{
+            !it?.isActive()
+        }
+
+        issueParameter.addCustomFieldToCopy ('Zugriffsbeschränkung (User)', zugriff)
+        issueParameter.beobachter = zugriff
+        switch (vorgangsTyp) {
+            case 'ITIS-Change':
+                switch (baseIssue?.priority?.name?.toLowerCase()) {
+                    case ['level 1', 'emergency change', 'blocker']:
+                        issueParameter.addFieldToCopy('priority', constantsManager.priorities?.findByName('Level 1'), '')
+                        break
+
+                    case ['level 2', 'highest', 'kritisch']:
+                        issueParameter.addFieldToCopy('priority', constantsManager.priorities?.findByName('Level 2'), '')
+                        break
+
+                    case ['level 3', 'high', 'medium']:
+                        issueParameter.addFieldToCopy('priority', constantsManager.priorities?.findByName('Level 3'), '')
+                        break
+
+                    case ['level 4', 'low', 'lowest', 'minor']:
+                        issueParameter.addFieldToCopy('priority', constantsManager.priorities?.findByName('Level 4'), '')
+                        break
+                }
+                break
+            case 'IT-Auftrag':
+                issueParameter.addCustomFieldToCopy('Wesentlichkeitsprüfung', this.jM?.getCustomFieldValueByName(baseIssue, 'Wesentlichkeit') as String, '')
+        }
+        // erstelle neuen Vorgang
+        MutableIssue neuerVorgang = this.jM?.createNewIssue(issueParameter) as MutableIssue
+        if(neuerVorgang){
+            this.tabLog?.debug(step, 'New issue created: <' + neuerVorgang?.key + '>')
+        }
+
+        issueCount += 1
+        //jM.addIssueParameterAdditions(neuerVorgang, issueParameter)
+
+
+        // ------------------->
+        //step = 'Return'
+        this.dropCallStack(methodName)
+        return issueCount
+    }
+
+    /**
+    * Erstellt einen zusätzlichen Epic für den aktuellen RfC (baseIssue), Komponente wird in der CustomField übergeben
+    *
+    * @param   baseIssue      Reference auf den aktuellen Vorgang
+    * @return  Anzahl der erstellten Vorgänge
+    */
+    private Integer createAdditonalIssueForRfc (MutableIssue baseIssue=null) {
+        String methodName = 'createAdditonalIssueForRfc'
+        this.pushCallStack (methodName)
+
+        // ------------------->
+        String step = 'Parameter'
+        if (baseIssue == null) {
+            this.tabLog?.exception (step, "Error: baseIssue is null")
+        }
+        this.tabLog?.debug (step, this.tabLog?.getParamInfo([baseIssue?.key]))
+
+        // ------------------->
+        //step = 'Benutzerdefinierte Felder'
+        Integer issueCount = 0
+
+        // ------------------->
+        step = 'Main'
+
+        String aenderungstyp = this.jM?.getCustomFieldValueByName(baseIssue, 'Änderungstyp')?.toString()
+        String softwareart = this.jM?.getCustomFieldValueByName(baseIssue, 'Softwareart')?.toString()
+
+        // ausgewählte Komponentennamen ermitteln
+        List<ObjectBean> anwendungFeld = this.jM?.getCustomFieldValueByName(baseIssue, 'Anwendung') as List<ObjectBean>
+        String anwendung = ''
+        String  fastTrack = this.jM?.getCustomFieldValueByName(baseIssue, 'Fast-Track')?.toString()
+
+        // Check if field value is "Nein"
+        String changeArt = ''
+        if(anwendungFeld?.size() > 0) {
+            anwendung = anwendungFeld?[0]?.label
+        }
+        if (fastTrack != "Ja") {
+          changeArt = 'IT-Auftrag'
+        if(aenderungstyp == 'Datenkorrektur'){
+            changeArt = 'Datenkorrektur'
+        }
+        else if(aenderungstyp == 'IT-Systemanpassung'){
+            changeArt = 'ITIS-Change'
+        }
+        else if(aenderungstyp == 'Konfigurationsänderung'){
+            changeArt = 'ITIS-Change'
+        }
+        else if(aenderungstyp == 'Softwareeinführung'){
+            changeArt = 'Softwareeinführung'
+            anwendung = changeArt
+        }
+          else if(aenderungstyp == 'Softwareausführung'){
+            changeArt = 'Softwareausführung'
+          }
+        else{
+            if(softwareart == 'Standardsoftware'){
+                String art = this.jM?.getCustomFieldValueByName(baseIssue, 'Anpassungsart')?.toString()
+                if(art == 'Customizing / Weiterentwicklung'){
+                    changeArt = 'IT-Auftrag'
+                }
+                else{
+                    changeArt = 'ITIS-Change'
+                }
+            }
+        }
+        }
+        else {
+          changeArt = 'Fast-Track'
+        }
+        this.tabLog?.debug (step, 'Anwendung <' + anwendung + ">")
+        this.tabLog?.debug(step, 'Changeart: ' + changeArt)
+
+        issueCount += createIssueForRfc (baseIssue, changeArt, anwendung) as Integer
+
+        // ------------------->
+        step = 'Return'
+        this.tabLog?.debug(step, 'issueCount = ' + issueCount)
+        this.dropCallStack(methodName)
+        return issueCount
+    }
+
+    /**
+     * Genehmigung für den RfC erstellen und mit RfC verknüpfen
+     */
+    private void rfcAddGenehmigung () {
+        String methodName = 'rfcAddGenehmigung'
+        this.pushCallStack (methodName)
+
+        // --------------------------->
+        String step = 'Parameter'
+        this.tabLog?.debug(step, 'Keine Parameter')
+
+        // --------------------------->
+        //step = 'Main'
+        List<String> descriptionFields =  ['Änderungsgrund','Wesentlichkeit', 'Dringlichkeitsstufe',
+                                           'Auswirkung des Changes', 'Begründung der Dringlichkeit',
+                                           'fachliches Risiko bei Nicht-Umsetzung', 'Kostenstellen']
+        this.addJiraGenehmigung(descriptionFields)
+
+        // --------------------------->
+        //step = 'Return'
+        this.dropCallStack(methodName)
+    }
+}
